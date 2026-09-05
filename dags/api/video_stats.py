@@ -1,18 +1,15 @@
-import requests
 import json
+import requests
 from datetime import date
-from pathlib import Path
-
-import os
-from dotenv import load_dotenv
-load_dotenv(dotenv_path="./.env")
+from airflow.decorators import task
+from airflow.models import Variable
 
 
-API_KEY = os.getenv("API_KEY")
-CHANNEL_HANDLE = 'mrbeast'
+API_KEY = Variable.get("API_KEY").strip()
+CHANNEL_HANDLE = Variable.get("CHANNEL_HANDLE").strip()
 maxResults = 50
 
-
+@task
 def get_playlist_id():
 
     try:
@@ -27,6 +24,12 @@ def get_playlist_id():
 
         # print(json.dumps(data,indent=4))
 
+        if not data.get("items"):
+            raise ValueError(
+                f"No 'items' returned for channel handle '{CHANNEL_HANDLE}'. "
+                f"API response: {json.dumps(data)}"
+            )
+
         channel_items = data["items"][0]
 
         channel_playlistId = channel_items["contentDetails"]["relatedPlaylists"][
@@ -39,6 +42,7 @@ def get_playlist_id():
         raise e
 
 
+@task
 def get_video_ids(playlistId):
 
     video_ids = []
@@ -77,6 +81,7 @@ def get_video_ids(playlistId):
         raise e
 
 
+@task
 def extract_video_data(video_ids):
 
     extracted_data = []
@@ -121,23 +126,16 @@ def extract_video_data(video_ids):
         raise e
 
 
+@task
 def save_to_json(extracted_data):
-    data_dir = Path(__file__).with_name("data")
-    data_dir.mkdir(parents=True, exist_ok=True)
-
-    file_path = data_dir / f"YT_data_{date.today()}.json"
+    file_path = f"./data/YT_data_{date.today()}.json"
 
     with open(file_path, "w", encoding="utf-8") as json_outfile:
         json.dump(extracted_data, json_outfile, indent=4, ensure_ascii=False)
-
-    return file_path
-
 
 
 if __name__ == "__main__":
     playlistId = get_playlist_id()
     video_ids = get_video_ids(playlistId)
-    print(extract_video_data(video_ids))
-    # print(video_ids)
     video_data = extract_video_data(video_ids)
     save_to_json(video_data)
