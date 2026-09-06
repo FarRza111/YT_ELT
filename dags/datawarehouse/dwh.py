@@ -116,3 +116,5 @@ def core_table():
         # Ensure the connection and cursor are closed
         if conn and cur:
             close_conn_cursor(conn, cur)
+
+

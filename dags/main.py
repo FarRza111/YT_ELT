@@ -1,56 +1,106 @@
-import pendulum
 from airflow import DAG
+import pendulum
 from datetime import datetime, timedelta
-from api.video_stats import(
+from airflow.operators.bash import BashOperator
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
+
+from api.video_stats import (
     get_playlist_id,
     get_video_ids,
     extract_video_data,
-    save_to_json
+    save_to_json,
 )
 
-from datawarehouse.dwh import create_schema, staging_table, core_table
-# from airflow.sdk import DAG
+from datawarehouse.dwh import staging_table, core_table
 
-local_tz = pendulum.timezone('Europe/Tallinn')
+# Define the local timezone
+local_tz = pendulum.timezone("Europe/Tallinn")
 
+SODA_PATH = "/opt/airflow/include/soda"
+DATASOURCE = "pg_datasource"
+
+
+def yt_elt_data_quality(schema):
+    return BashOperator(
+        task_id=f"soda_test_{schema}",
+        bash_command=f"soda scan -d {DATASOURCE} -c {SODA_PATH}/configuration.yml -v SCHEMA={schema} {SODA_PATH}/checks.yml -V",
+    )
+
+# Default Args
 default_args = {
-    'owner': 'farrza111',
-    'depends_on_past': False,
-    'start_date': datetime(2025, 1,1, tzinfo=local_tz),
-    'dagrun_timeout': timedelta(hours=1),
-    'email': 'data@engineers.com',
-    'email_on_failure': False,
-    'email_on_retry': False,
-    'retries': 1,
-    'max_active_runs': 1,
-    'retry_delay': timedelta(minutes=5),
+    "owner": "dataengineers",
+    "depends_on_past": False,
+    "email_on_failure": False,
+    "email_on_retry": False,
+    "email": "data@engineers.com",
+    # 'retries': 1,
+    # 'retry_delay': timedelta(minutes=5),
+    "max_active_runs": 1,
+    "dagrun_timeout": timedelta(hours=1),
+    "start_date": datetime(2025, 1, 1, tzinfo=local_tz),
+    # 'end_date': datetime(2030, 12, 31, tzinfo=local_tz),
 }
 
+# Variables
+staging_schema = "staging"
+core_schema = "core"
+
+# DAG 1: produce_json
 with DAG(
     dag_id="produce_json",
-    default_args = default_args,
-    description = 'Dag to produce JSON file with raw data',
-    start_date=datetime(2021, 1, 1),
+    default_args=default_args,
+    description="DAG to produce JSON file with raw data",
     schedule="0 14 * * *",
-    catchup = False
-):
-    # Define Tasks
-    playlsts_id = get_playlist_id()
-    video_ids = get_video_ids(playlsts_id)
+    catchup=False,
+) as dag_produce:
+
+    # Define tasks
+    playlist_id = get_playlist_id()
+    video_ids = get_video_ids(playlist_id)
     extract_data = extract_video_data(video_ids)
     save_to_json_task = save_to_json(extract_data)
-    playlsts_id >> video_ids >> extract_data >> save_to_json_task
 
+    trigger_update_db = TriggerDagRunOperator(
+        task_id="trigger_update_db",
+        trigger_dag_id="update_db",
+    )
 
+    # Define dependencies
+    playlist_id >> video_ids >> extract_data >> save_to_json_task >> trigger_update_db
+
+# DAG 2: update_db
 with DAG(
     dag_id="update_db",
-    default_args = default_args,
-    description = 'Dag to process JSON file and insert data both to staging and core schema',
-    start_date=datetime(2021, 1, 1),
-    schedule="0 15 * * *",
-    catchup = False
-):
+    default_args=default_args,
+    description="DAG to process JSON file and insert data into both staging and core schemas",
+    catchup=False,
+    schedule=None,
+) as dag_update:
+
+    # Define tasks
     update_staging = staging_table()
     update_core = core_table()
-    
-    update_staging >> update_core
+
+    trigger_data_quality = TriggerDagRunOperator(
+        task_id="trigger_data_quality",
+        trigger_dag_id="data_quality",
+    )
+
+    # Define dependencies
+    update_staging >> update_core 
+
+# DAG 3: data_quality
+with DAG(
+    dag_id="data_quality",
+    default_args=default_args,
+    description="DAG to check the data quality on both layers in the database",
+    catchup=False,
+    schedule=None,
+) as dag_quality:
+
+    # Define tasks
+    soda_validate_staging = yt_elt_data_quality(staging_schema)
+    soda_validate_core = yt_elt_data_quality(core_schema)
+
+    # Define dependencies
+    soda_validate_staging >> soda_validate_core
